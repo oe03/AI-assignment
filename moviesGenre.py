@@ -1,65 +1,65 @@
-import math  # ✅ CHANGED: needed for ceil if you want it
 import streamlit as st
 import pandas as pd
-import re
-import random
+import re, math, random
 
-class GenreRecommender:
-    def __init__(self, movies_file, ratings_file):
-        # Load data
-        self.movies = pd.read_csv(movies_file)
-        self.ratings = pd.read_csv(ratings_file)
+MOVIES_PATH  = "dataset/movies.csv"
+RATINGS_PATH = "dataset/ratings.csv"
 
-        # Extract year from title
-        self.movies['year'] = self.movies['title'].apply(
-            lambda x: int(re.search(r'\((\d{4})\)', x).group(1)) if re.search(r'\((\d{4})\)', x) else None
+# ------------------ Init Session State ------------------
+if "top10" not in st.session_state:
+    st.session_state["top10"] = None
+    st.session_state["total_matches"] = 0
+    st.session_state["C"] = 0
+    st.session_state["m"] = 0
+
+# ------------------ Helpers ------------------
+@st.cache_data
+def load_data(movies_path: str, ratings_path: str):
+    movies  = pd.read_csv(movies_path)
+    ratings = pd.read_csv(ratings_path)
+
+    # Extract year
+    if "year" not in movies:
+        movies["year"] = movies["title"].apply(
+            lambda x: int(re.search(r"\((\d{4})\)", x).group(1)) if re.search(r"\((\d{4})\)", x) else None
         )
+    # Clean title
+    if "clean_title" not in movies:
+        movies["clean_title"] = movies["title"].apply(lambda x: re.sub(r"\s*\(\d{4}\)", "", x))
 
-        # Create clean title (without year)
-        self.movies['clean_title'] = self.movies['title'].apply(
-            lambda x: re.sub(r'\s*\(\d{4}\)', '', x)
-        )
+    return movies, ratings
 
-        # ---------- ⭐ Use the same formula as your rating module ----------
-        # Per-movie stats: votes (v) and plain average (R -> avg)
-        stats = (self.ratings.groupby('movieId')
-                 .agg(v=('rating', 'count'), R=('rating', 'mean'))
-                 .reset_index())
-        stats = stats.rename(columns={'R': 'avg'})  # keep plain average for display
+def compute_weighted_table(ratings, movies, genre_filter=None, year_range=None):
+    stats = (
+        ratings.groupby("movieId")
+               .agg(v=("rating","count"), R=("rating","mean"))
+               .reset_index()
+    )
+    C   = float(ratings["rating"].mean())
+    m_q = float(stats["v"].quantile(0.80))
+    m   = int(math.ceil(m_q))
 
-        # Global mean C and vote threshold m (80th percentile like your module)
-        self.C = float(self.ratings['rating'].mean())
-        m_q = float(stats['v'].quantile(0.80))
-        self.m = int(m_q)  # or int(math.ceil(m_q)) if you prefer a ceiling
+    stats["WeightedRating"] = (stats["v"]/(stats["v"]+m))*stats["R"] + (m/(stats["v"]+m))*C
+    table = stats.merge(movies, on="movieId", how="left")
 
-        # IMDb-style weighted score for ranking ONLY
-        stats['score'] = (stats['v'] / (stats['v'] + self.m)) * stats['avg'] + (self.m / (stats['v'] + self.m)) * self.C
+    # Apply filters
+    if genre_filter and genre_filter != ["All"]:
+        regex = "|".join(genre_filter)
+        table = table[table["genres"].str.contains(regex, case=False, na=False)]
+    if year_range:
+        y0, y1 = year_range
+        yr = table["year"].astype("Int64")
+        table = table[(yr.fillna(-1) >= y0) & (yr <= y1)]
 
-        # Merge stats into movies dataframe (now movies has: avg, v, score)
-        self.movies = self.movies.merge(stats, on='movieId', how='left')
+    table = table.query("v >= @m").copy()
+    return table, C, m
 
-    def recommend(self, selected_genres, year_range, top_n=50):
-        # Filter by selected genres and year range
-        df = self.movies.copy()
-        if selected_genres:
-            df = df[df['genres'].str.contains('|'.join(selected_genres), case=False, na=False)]
-        df = df[(df['year'] >= year_range[0]) & (df['year'] <= year_range[1])]
+# ------------------ UI ------------------
+st.set_page_config(page_title="Movie Recommender — Genres Module", layout="wide")
 
-        # (Optional) enforce vote floor like your module:
-        # df = df[df['v'] >= self.m]
-
-        # ✅ CHANGED: sort by Bayesian score (fair ranking), but DISPLAY only avg later
-        df = df.sort_values('score', ascending=False)
-
-        # Return only the columns your teammate wants to show (no score shown)
-        out = df[['clean_title', 'genres', 'year', 'avg']].head(top_n).copy()
-        out['avg'] = out['avg'].round(2)  # nice formatting
-        return out
-
-# ---------------- STREAMLIT APP ----------------
 st.markdown(
     """
-    <div style='text-align: center;'>
+       <div style='text-align: center;'>
         <h1 style='color: #FF4B4B; margin-bottom: 0; white-space: nowrap;'>
             🍿 Movie Recommender System 🍿
         </h1>
@@ -67,103 +67,74 @@ st.markdown(
             Genres Explorer
         </h2>
         <h3 style='color: #444; font-weight: normal; margin-top: 5px;'>
-            🎬 Pick your favorite genres 🎬 <br>
+            🎭 Pick your favorite genres 🎭 <br>
             Or Let Us Surprise You With A Hidden Gem ✨
         </h3>
         <hr style='border: 1px solid #ddd; margin-top: 10px;'>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# Initialize recommender
-recommender = GenreRecommender("dataset/movies.csv", "dataset/ratings.csv")
+movies, ratings = load_data(MOVIES_PATH, RATINGS_PATH)
 
-# Initialize session state
-if "filtered_movies" not in st.session_state:
-    st.session_state["filtered_movies"] = pd.DataFrame()
+# Genres list
+all_genres = sorted({g for gs in movies["genres"].dropna().str.split("|") for g in gs if g != "(no genres listed)"})
+GENRES = ["All"] + all_genres
 
-# User input: genre selection
-all_genres = sorted(set(g for gs in recommender.movies['genres'].dropna().str.split('|') for g in gs))
-selected_genres = st.multiselect("🎭 Select genres:", all_genres, default=[])
+# Dynamic year range
+min_year, max_year = int(movies["year"].min()), int(movies["year"].max())
 
-# User input: year range
-min_year, max_year = int(recommender.movies['year'].min()), int(recommender.movies['year'].max())
-year_range = st.slider(
-    "📅 Select year range:",
-    min_value=min_year,
-    max_value=max_year,
-    value=(min_year, max_year)
-)
+# User inputs
+selected_genres = st.multiselect("🎭 Select genres:", GENRES, default=["All"])
+year_range = st.slider("📅 Year range:", min_year, max_year, (min_year, max_year))
 
 # ---------------- Show Recommendations ----------------
 if st.button("📌 Show Recommendations"):
-    if selected_genres:
-        filtered = recommender.recommend(selected_genres, year_range, top_n=500)
-    else:
-        # no genres picked: still sort by score internally via recommend()
-        filtered = recommender.recommend([], year_range, top_n=500)
-
-    st.session_state["filtered_movies"] = filtered
-
-# Display table if filtered data exists
-if not st.session_state["filtered_movies"].empty:
-    filtered_movies_display = st.session_state["filtered_movies"].copy()
-    filtered_movies_display['year'] = filtered_movies_display['year'].astype(int)
-    filtered_movies_display = filtered_movies_display[['clean_title', 'genres', 'year', 'avg']]  # ✅ CHANGED: show avg only
-    filtered_movies_display = filtered_movies_display.rename(columns={
-        'clean_title': 'Movies Title',
-        'genres': 'Genres',
-        'year': 'Year',
-        'avg': 'Average Rating'  # ✅ CHANGED: nicer label
-    })
-
-    # Summary
-    st.info(f"Found {len(filtered_movies_display)} movies matching your selection ({year_range[0]}–{year_range[1]})")
-
-    # Sort dropdown (keep UI behavior; sorts *display* only)
-    sort_option = st.selectbox(
-        "🔃 Sort movies by:",
-        options=["Title (A-Z)", "Year (Ascending)", "Year (Descending)", "Random"]
+    table, C, m = compute_weighted_table(
+        ratings, movies,
+        genre_filter=selected_genres,
+        year_range=year_range
     )
-    if sort_option == "Title (A-Z)":
-        filtered_movies_display = filtered_movies_display.sort_values(by='Movies Title', ascending=True)
-    elif sort_option == "Year (Ascending)":
-        filtered_movies_display = filtered_movies_display.sort_values(by='Year', ascending=True)
-    elif sort_option == "Year (Descending)":
-        filtered_movies_display = filtered_movies_display.sort_values(by='Year', ascending=False)
-    elif sort_option == "Random":
-        filtered_movies_display = filtered_movies_display.sample(frac=1).reset_index(drop=True)
 
-    st.dataframe(filtered_movies_display, width=1200, height=800)
+    if not table.empty:
+        # Random Top 10 from filter
+        top10 = table.sample(n=min(10, len(table)), random_state=random.randint(0, 10000))
+        top10 = (
+            top10[["clean_title", "genres", "year", "R"]]
+            .rename(columns={
+                "clean_title": "Movies Title",
+                "genres": "Genres",
+                "year": "Year",
+                "R": "Average Rating"
+            })
+            .reset_index(drop=True)
+        )
+        top10["Average Rating"] = top10["Average Rating"].round(1)
 
-# ---------------- Surprise Me ----------------
-if st.button("🎲 Surprise Me With RANDOM Suggestion !"):
-    # Build the same filtered pool
-    pool = recommender.movies.copy()
-    if selected_genres:
-        pool = pool[pool['genres'].str.contains('|'.join(selected_genres), case=False, na=False)]
-    pool = pool[(pool['year'] >= year_range[0]) & (pool['year'] <= year_range[1])]
+        # Save Top 10 in session
+        st.session_state["top10"] = top10
+        st.session_state["total_matches"] = len(table)
+        st.session_state["C"] = C
+        st.session_state["m"] = m
+    else:
+        st.warning("No movies found for this filter.")
 
-    # Keep only reasonably good movies by avg if you want (same as before)
-    pool = pool[pool['avg'] >= 4.0]
+# Always show recommendations if available
+if st.session_state["top10"] is not None:
+    st.markdown(
+        f"### 📌 Here Are 10 Randomly Selected Movies (Out of {st.session_state['total_matches']} matches)"
+    )
+    st.dataframe(st.session_state["top10"], use_container_width=True)
 
-    # ✅ CHANGED: pick from top-K by score for fairness, but DISPLAY avg only
-    topK = 50
-    pool = pool.sort_values('score', ascending=False).head(topK)
-
-    if len(pool) > 0:
-        surprise = pool.sample(1).iloc[0]
-        title = surprise['clean_title']
-        year = int(surprise['year'])
-        rating = round(float(surprise['avg']), 2)  # display average rating only
-        genres = surprise['genres']
-
+# Surprise Me button
+if st.button("🎲 Surprise Me From Top 10"):
+    if st.session_state["top10"] is not None:
+        surprise = st.session_state["top10"].sample(1).iloc[0]
         st.success(
-            f"🎉 Tonight’s Randomly Pick : **{title} ({year})** 🎬\n\n"
-            f"⭐ Average Rating : {rating}\n\n"
-            f"🎭 Genre : {genres}\n\n"
-            f"🔥 Grab your popcorn and enjoy the show!"
+            f"🎉 Surprise Pick (From The Top 10 List Above): **{surprise['Movies Title']} ({int(surprise['Year'])})** 🎬\n\n"
+            f"⭐ Average Rating: {surprise['Average Rating']}\n\n"
+            f"🎭 Genres: {surprise['Genres']}"
         )
     else:
-        st.warning("No movies found for this filter with average rating ≥ 4.0.")
+        st.warning("⚠️ Please click 'Show Recommendations' first before using Surprise Me!")
