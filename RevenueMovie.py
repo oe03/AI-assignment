@@ -15,8 +15,12 @@ class PopularityRecommender:
         self.movies = self.movies[['title', 'popularity']].dropna()
         self.movies = self.movies[self.movies['popularity'] > 0].reset_index(drop=True)
 
+    def top_n_popular(self, n=10):
+        """Return top-N globally popular movies (baseline popularity-based filtering)"""
+        return self.movies.sort_values(by="popularity", ascending=False).head(n)
+
     def recommend_by_popularity(self, popularity, locked_range=None):
-        """Recommend movies within ±15% popularity range"""
+        """Recommend movies within ±15% popularity range (personalized popularity filtering)"""
         if not locked_range:
             lower = popularity * 0.85
             upper = popularity * 1.15
@@ -37,7 +41,7 @@ st.markdown(
             🎬 Movie Recommender System 🎬
         </h1>
         <h2 style='color: #FF4B4B; margin-top: 5px;'>
-            Popularity Explorer
+            Popularity-Based Filtering
         </h2>
         <h3 style='color: #444; font-weight: normal; margin-top: 5px;'>
             🌟 Discover Movies with Similar Popularity 🌟 <br>
@@ -52,7 +56,11 @@ st.markdown(
 # Initialize recommender
 recommender = PopularityRecommender("dataset/RevenueMovies.csv")
 
-# Session state
+# ---------------- Show Baseline Global Popularity ----------------
+st.subheader("🔥 Top 10 Globally Popular Movies (Baseline)")
+st.table(recommender.top_n_popular(10))
+
+# ---------------- Session state ----------------
 if "locked_range" not in st.session_state:
     st.session_state["locked_range"] = None
 if "selected_movies" not in st.session_state:
@@ -69,14 +77,12 @@ if "user_preferences" not in st.session_state:
     st.session_state["user_preferences"] = []
 
 
-# Callback helpers to enforce mutual exclusivity
+# Callback helpers
 def _on_like_change(title):
-    # If like was checked, force dislike to False
     like_key = f"like_{title}"
     dislike_key = f"dislike_{title}"
     if st.session_state.get(like_key, False):
         st.session_state[dislike_key] = False
-
 
 def _on_dislike_change(title):
     dislike_key = f"dislike_{title}"
@@ -88,7 +94,6 @@ def _on_dislike_change(title):
 # ================== Movie Selection ==================
 st.subheader("🎥 Select Movies You Watched (Max 10)")
 
-# Keep previously selected movies always visible
 selected_df = recommender.movies[recommender.movies['title'].isin(st.session_state["selected_movies"])]
 remaining_df = st.session_state["sample_movies"][~st.session_state["sample_movies"]['title'].isin(st.session_state["selected_movies"])]
 all_movies_to_show = pd.concat([selected_df, remaining_df]).drop_duplicates().reset_index(drop=True)
@@ -100,19 +105,16 @@ for _, row in all_movies_to_show.iterrows():
         st.write(f"**{row['title']}** (Popularity: {row['popularity']:.2f})")
     with col2:
         key = f"movie_{row['title']}"
-        # Ensure key exists so checkbox preserves state across reruns
         if key not in st.session_state:
             st.session_state[key] = (row['title'] in st.session_state["selected_movies"])
         checked = st.checkbox("Select", key=key)
         if checked:
             new_selected_movies.append(row['title'])
 
-# cap at 10
 if len(new_selected_movies) > 10:
     st.warning("⚠️ You can only select up to 10 movies.")
     new_selected_movies = new_selected_movies[:10]
 
-# Update session state with current checked movies (unchecking removes it from calculations)
 st.session_state["selected_movies"] = new_selected_movies
 
 if st.session_state["selected_movies"]:
@@ -126,9 +128,7 @@ with colA:
 with colB:
     refresh_list = st.button("🔄 Refresh Movie List")
 
-# Refresh list of initial movies (keep selected intact & visible, no dups)
 if refresh_list:
-    # Keep selected visible, fill remaining slots with new random sample excluding selected
     pool = recommender.movies[~recommender.movies['title'].isin(st.session_state["selected_movies"])]
     slots = max(0, 20 - len(st.session_state["selected_movies"]))
     new_sample = pool.sample(min(slots, len(pool))).reset_index(drop=True)
@@ -141,9 +141,8 @@ if refresh_list:
 # ================== Recommendations ==================
 if show_recs:
     all_recs = pd.DataFrame()
-    st.session_state["locked_range"] = None  # reset lock when generating new recommendations
+    st.session_state["locked_range"] = None
     for title in st.session_state["selected_movies"]:
-        # Guard if title not found (edge case)
         match = recommender.movies[recommender.movies['title'] == title]
         if match.empty:
             continue
@@ -154,18 +153,14 @@ if show_recs:
         all_recs = pd.concat([all_recs, recs])
 
     if not all_recs.empty:
-        # Remove any items already marked as watched
         all_recs = all_recs[~all_recs['title'].isin(st.session_state["selected_movies"])]
         st.session_state["recommendations"] = all_recs.drop_duplicates(subset=['title']).sample(min(10, len(all_recs)))
     else:
         st.session_state["recommendations"] = pd.DataFrame()
 
 
-# Display recommendations
 if not st.session_state["recommendations"].empty:
-    st.subheader("🎯 Interested in any of the movies below? Tick to mark as interested, or mark as not interested. Refresh if not interested in any.")
-
-    # Render like / dislike checkboxes with mutual exclusivity enforced via callbacks
+    st.subheader("🎯 Movies with Similar Popularity (Your Recommendations)")
     for _, row in st.session_state["recommendations"].reset_index(drop=True).iterrows():
         title = row['title']
         col1, col2, col3 = st.columns([4, 1.2, 1.8])
@@ -174,7 +169,6 @@ if not st.session_state["recommendations"].empty:
         like_key = f"like_{title}"
         dislike_key = f"dislike_{title}"
 
-        # Initialize keys if they don't exist
         if like_key not in st.session_state:
             st.session_state[like_key] = (title in st.session_state["selected_recommended"])
         if dislike_key not in st.session_state:
@@ -185,16 +179,13 @@ if not st.session_state["recommendations"].empty:
         with col3:
             st.checkbox("Not interested", key=dislike_key, on_change=_on_dislike_change, args=(title,))
 
-    # After rendering, collect selections
     like_titles = [t for t in st.session_state["recommendations"]["title"].tolist() if st.session_state.get(f"like_{t}", False)]
     dislike_titles = [t for t in st.session_state["recommendations"]["title"].tolist() if st.session_state.get(f"dislike_{t}", False)]
 
-    # Optional cap on positive selections
     if len(like_titles) > 5:
         st.warning("⚠️ You can only choose up to 5 liked movies from recommendations.")
         like_titles = like_titles[:5]
 
-    # Persist selections across reruns
     st.session_state["selected_recommended"] = like_titles
     st.session_state["disliked_recommended"] = dislike_titles
 
@@ -203,19 +194,16 @@ if not st.session_state["recommendations"].empty:
     if st.session_state["disliked_recommended"]:
         st.info(f"🙅 Not interested: {', '.join(st.session_state['disliked_recommended'])}")
 
-    # Capture user preferences for future reference (only likes)
     if st.session_state["selected_recommended"]:
         chosen = st.session_state["recommendations"][
             st.session_state["recommendations"]["title"].isin(st.session_state["selected_recommended"])
         ]
         st.session_state["user_preferences"].extend(chosen.to_dict('records'))
 
-    # Refresh recommendations button (keep selections)
     if st.button("🔄 Refresh Recommendations"):
         st.session_state["recommendations"] = st.session_state["recommendations"].sample(frac=1).reset_index(drop=True)
 
     # ================== Precision (Feedback-based) ==================
-    # We compute precision using only items the user explicitly evaluated (liked or not interested)
     evaluated = len(set(st.session_state["selected_recommended"]) | set(st.session_state["disliked_recommended"]))
     relevant = len(st.session_state["selected_recommended"])
 
@@ -224,8 +212,6 @@ if not st.session_state["recommendations"].empty:
         st.subheader("📊 Recommendation Precision (Based on Your Feedback)")
         st.metric("Precision", f"{precision:.2f}")
         with st.expander("What does this mean?"):
-            st.write(
-                "Precision = Liked ÷ (Liked + Not interested). "
-            )
+            st.write("Precision = Liked ÷ (Liked + Not interested).")
     else:
         st.info("Mark some recommendations as Like or Not interested to see precision.")

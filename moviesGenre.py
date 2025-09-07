@@ -89,6 +89,18 @@ min_year, max_year = int(movies["year"].min()), int(movies["year"].max())
 selected_genres = st.multiselect("🎭 Select genres:", GENRES, default=["All"])
 year_range = st.slider("📅 Year range:", min_year, max_year, (min_year, max_year))
 
+# ------------------ Reset Top 10 if Inputs Change ------------------
+if ("last_selected_genres" not in st.session_state or 
+    st.session_state["last_selected_genres"] != selected_genres or
+    "last_year_range" not in st.session_state or
+    st.session_state["last_year_range"] != year_range):
+    
+    st.session_state["top10"] = None
+    st.session_state["total_matches"] = 0
+
+st.session_state["last_selected_genres"] = selected_genres
+st.session_state["last_year_range"] = year_range
+
 # ---------------- Show Recommendations ----------------
 if st.button("📌 Show Recommendations"):
     table, C, m = compute_weighted_table(
